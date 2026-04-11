@@ -22,7 +22,7 @@ from pydantic import BaseModel, field_validator
 from db import load_amenities_by_type, load_amenity_types, load_apartments
 from rtree.build import str_build
 from rtree.node import RTreeNode
-from rtree.search import ann_search
+from rtree.search import ann_search, ann_search_mbm
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(name)s  %(message)s")
 logger = logging.getLogger("apartmentgps")
@@ -44,23 +44,30 @@ app.add_middleware(
 # ─────────────────────────────────────────────────────────────────────────────
 
 _apartments: Optional[List[dict]] = None
+_apt_tree: Optional[RTreeNode] = None
 _type_trees: Optional[Dict[str, Optional[RTreeNode]]] = None
+_amenities_by_type: Optional[Dict[str, List[dict]]] = None
 _amenity_types: Optional[List[dict]] = None
 
 
 def _ensure_loaded() -> None:
-    global _apartments, _type_trees, _amenity_types
+    global _apartments, _apt_tree, _type_trees, _amenities_by_type, _amenity_types
 
     if _apartments is None:
         logger.info("Loading apartments…")
         _apartments = load_apartments()
         logger.info("  → %d apartments", len(_apartments))
 
+    if _apt_tree is None:
+        logger.info("Building apartment R-tree…")
+        _apt_tree = str_build(_apartments)
+        logger.info("  → apartment R-tree ready")
+
     if _type_trees is None:
-        logger.info("Building R-trees…")
-        by_type = load_amenities_by_type()
-        _type_trees = {code: str_build(entries) for code, entries in by_type.items()}
-        counts = {code: len(entries) for code, entries in by_type.items()}
+        logger.info("Building amenity R-trees…")
+        _amenities_by_type = load_amenities_by_type()
+        _type_trees = {code: str_build(entries) for code, entries in _amenities_by_type.items()}
+        counts = {code: len(entries) for code, entries in _amenities_by_type.items()}
         logger.info("  → trees built: %s", counts)
 
     if _amenity_types is None:
@@ -136,8 +143,8 @@ def search(req: SearchRequest):
     total = sum(req.weights.values())
     normalised = {k: v / total for k, v in req.weights.items()}
 
-    results = ann_search(
-        apartments=_apartments,
+    results = ann_search_mbm(
+        apt_tree=_apt_tree,
         type_trees=_type_trees,
         weights=normalised,
         top_k=req.top_k,
@@ -145,12 +152,42 @@ def search(req: SearchRequest):
     return results
 
 
+@app.get("/amenities")
+def get_amenities(type_code: Optional[str] = None):
+    """Return amenities, optionally filtered by type_code."""
+    _ensure_loaded()
+    if type_code:
+        return _amenities_by_type.get(type_code, [])
+    return [e for entries in _amenities_by_type.values() for e in entries]
+
+
+@app.post("/search/visualize")
+def search_visualize(req: SearchRequest):
+    """
+    Same as /search but also returns the full MBM algorithm trace for visualization.
+
+    Response: { "results": [...], "trace": { "apt_tree_nodes", "steps", "stats" } }
+    """
+    _ensure_loaded()
+    total = sum(req.weights.values())
+    normalised = {k: v / total for k, v in req.weights.items()}
+    return ann_search_mbm(
+        apt_tree=_apt_tree,
+        type_trees=_type_trees,
+        weights=normalised,
+        top_k=req.top_k,
+        debug=True,
+    )
+
+
 @app.post("/reload")
 def reload_data():
     """Force-reload all data from the database and rebuild R-trees."""
-    global _apartments, _type_trees, _amenity_types
+    global _apartments, _apt_tree, _type_trees, _amenities_by_type, _amenity_types
     _apartments = None
+    _apt_tree = None
     _type_trees = None
+    _amenities_by_type = None
     _amenity_types = None
     _ensure_loaded()
     return {
