@@ -1,73 +1,171 @@
-import { useState } from "react";
-import GraphCanvas from "./components/GraphCanvas";
-import { useGraphStore } from "./graph/store";
-import { randomGraph } from "./graph/generate";
+import { useState, useEffect } from "react";
+import AmenitySelector from "./components/AmenitySelector";
+import ResultsList from "./components/ResultsList";
+import { fetchAmenityTypes, searchApartments } from "./api";
+import type { AmenityType, ApartmentResult } from "./api";
 
 export default function App() {
-  const { setGraph, getEdgeId } = useGraphStore();
-  const [highlightNodes, setHighlightNodes] = useState<Set<string>>();
-  const [highlightEdges, setHighlightEdges] = useState<Set<string>>();
+  const [amenityTypes, setAmenityTypes] = useState<AmenityType[]>([]);
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [weights, setWeights] = useState<Record<string, number>>({});
+  const [topK, setTopK] = useState(5);
+  const [results, setResults] = useState<ApartmentResult[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  function generateNew() {
-    const { nodes, edges } = randomGraph(8, 0.4);
-    setGraph(nodes, edges);
-    setHighlightNodes(undefined);
-    setHighlightEdges(undefined);
+  useEffect(() => {
+    fetchAmenityTypes()
+      .then((types) => {
+        setAmenityTypes(types);
+        const sel: Record<string, boolean> = {};
+        const w: Record<string, number> = {};
+        types.forEach((t) => {
+          sel[t.type_code] = false;
+          w[t.type_code] = t.default_weight;
+        });
+        setSelected(sel);
+        setWeights(w);
+      })
+      .catch(() =>
+        setError("Cannot reach API — is the backend running on :8000?"),
+      );
+  }, []);
+
+  async function handleSearch() {
+    const activeWeights = Object.fromEntries(
+      Object.entries(weights).filter(([k]) => selected[k]),
+    );
+    if (Object.keys(activeWeights).length === 0) return;
+
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await searchApartments(activeWeights, topK);
+      setResults(data);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Search failed");
+    } finally {
+      setLoading(false);
+    }
   }
 
-  function highlight(nodeIds: string[], edgeIds: string[]) {
-    setHighlightNodes(new Set(nodeIds));
-    setHighlightEdges(new Set(edgeIds));
-  }
-
-  function clearHighlight() {
-    setHighlightNodes(undefined);
-    setHighlightEdges(undefined);
-  }
+  const activeCount = Object.values(selected).filter(Boolean).length;
 
   return (
-    <div style={{ display: "flex", width: "100vw", height: "100vh" }}>
-      {/* left panel — guide + controls */}
+    <div
+      style={{
+        display: "flex",
+        width: "100vw",
+        height: "100vh",
+        fontFamily: "system-ui, 'Segoe UI', sans-serif",
+        overflow: "hidden",
+      }}
+    >
+      {/* ── Left panel ── */}
       <div
         style={{
-          width: 280,
-          padding: 16,
+          width: 300,
+          minWidth: 300,
+          display: "flex",
+          flexDirection: "column",
+          gap: 16,
+          padding: 20,
           overflowY: "auto",
-          background: "#1a1a1a",
+          background: "#0f0f1a",
+          borderRight: "1px solid #2e303a",
           color: "#ccc",
         }}
       >
-        <h2 style={{ marginTop: 0 }}>ANN R-Tree</h2>
-        <p>Explanation goes here.</p>
+        {/* Title */}
+        <div>
+          <h2 style={{ margin: 0, color: "#e2e8f0", fontSize: 18, fontWeight: 700 }}>
+            🏢 ApartmentGPS
+          </h2>
+          <p style={{ margin: "4px 0 0", fontSize: 12, color: "#555" }}>
+            District 9 · ANN R-tree ranking
+          </p>
+        </div>
 
-        <button
-          onClick={generateNew}
-          style={{ marginBottom: 8, display: "block" }}
-        >
-          New random graph
-        </button>
+        <hr style={{ border: "none", borderTop: "1px solid #2e303a", margin: 0 }} />
 
+        {/* Amenity type selector */}
+        <AmenitySelector
+          types={amenityTypes}
+          selected={selected}
+          weights={weights}
+          onToggle={(code) =>
+            setSelected((s) => ({ ...s, [code]: !s[code] }))
+          }
+          onWeight={(code, val) =>
+            setWeights((w) => ({ ...w, [code]: val }))
+          }
+        />
+
+        <hr style={{ border: "none", borderTop: "1px solid #2e303a", margin: 0 }} />
+
+        {/* Top-K */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <label style={{ fontSize: 13, color: "#888" }}>Top-K results</label>
+          <select
+            value={topK}
+            onChange={(e) => setTopK(Number(e.target.value))}
+            style={{
+              marginLeft: "auto",
+              background: "#1a1a2e",
+              color: "#e2e8f0",
+              border: "1px solid #3e404a",
+              borderRadius: 5,
+              padding: "4px 8px",
+              fontSize: 13,
+            }}
+          >
+            {[3, 5, 8, 10].map((k) => (
+              <option key={k} value={k}>
+                {k}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Search button */}
         <button
-          onClick={() => {
-            const edgeId = getEdgeId("n0", "n2");
-            highlight(["n0", "n2"], edgeId ? [edgeId] : []);
+          onClick={handleSearch}
+          disabled={activeCount === 0 || loading}
+          style={{
+            padding: "11px 0",
+            borderRadius: 7,
+            border: "none",
+            fontWeight: 700,
+            fontSize: 14,
+            cursor: activeCount === 0 || loading ? "not-allowed" : "pointer",
+            background:
+              activeCount === 0 || loading ? "#1e1e2e" : "#7c3aed",
+            color: activeCount === 0 || loading ? "#444" : "#fff",
+            transition: "background 0.2s",
           }}
-          style={{ marginBottom: 8, display: "block" }}
         >
-          Test highlight
+          {loading
+            ? "Searching…"
+            : activeCount === 0
+              ? "Select at least one type"
+              : `Search  (top ${topK})`}
         </button>
 
-        <button onClick={clearHighlight} style={{ display: "block" }}>
-          Clear highlight
-        </button>
+        {error && (
+          <p style={{ margin: 0, fontSize: 12, color: "#f87171" }}>{error}</p>
+        )}
       </div>
 
-      {/* right panel — canvas */}
-      <div style={{ flex: 1 }}>
-        <GraphCanvas
-          highlightNodes={highlightNodes}
-          highlightEdges={highlightEdges}
-        />
+      {/* ── Right panel ── */}
+      <div
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          background: "#111",
+          padding: 24,
+        }}
+      >
+        <ResultsList results={results} loading={loading} />
       </div>
     </div>
   );
