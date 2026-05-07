@@ -2,11 +2,28 @@
 MBR (Minimum Bounding Rectangle) and RTreeNode definitions.
 
 Coordinates are stored as (latitude, longitude) in decimal degrees.
-Distances are in meters.  For mindist we clamp the query point to the
+Distances are in meters.  
+Mindist: is the smallest distance from the amenity (query point) to the MBR's border. 
+    q = (qx, qy)
+    dx = max(0, x_min - qx, qx - x_max)
+    dy = max(0, q_y - y_max, y_min - qy)
+    Math formula: mindist(N, q) = sqrt(dx^2 + dy^2)
+
 MBR boundary and use the Haversine formula — accurate enough for the
 small area of District 9, HCMC.
-"""
 
+This file contains:
+1. Functions:
+- haversine
+- mindist
+- center
+- expand
+- from_nodes
+- from_entries
+2. Classes: 
+- MBR
+- RTreeNode
+"""
 import math
 from dataclasses import dataclass, field
 from typing import Any, List
@@ -20,6 +37,7 @@ def haversine(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     phi2 = math.radians(lat2)
     dphi = math.radians(lat2 - lat1)
     dlambda = math.radians(lon2 - lon1)
+    # Checked the Haversine formula
     a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
     return 2.0 * EARTH_RADIUS_M * math.asin(math.sqrt(a))
 

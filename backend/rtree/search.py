@@ -131,6 +131,8 @@ def ann_search(
         nearest_amenities: Dict[str, dict] = {}
 
         for type_code, weight in active_types.items():
+
+            
             tree = type_trees[type_code]
             nearest = nearest_neighbor(tree, lat, lon)
             if nearest is not None:
@@ -154,72 +156,6 @@ def ann_search(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  MBR-to-amenity-tree lower bound  (used by ann_search_mbm)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _mbr_to_mbr_mindist(apt_mbr, node_mbr) -> float:
-    """
-    Minimum possible distance between any point in apt_mbr and any point in node_mbr.
-
-    Finds the nearest point in node_mbr to apt_mbr, then uses apt_mbr.mindist
-    on that point.  Returns 0 when the two MBRs overlap.
-    """
-    # Nearest lat in node_mbr to apt_mbr
-    if node_mbr.max_lat < apt_mbr.min_lat:
-        p_lat = node_mbr.max_lat
-    elif node_mbr.min_lat > apt_mbr.max_lat:
-        p_lat = node_mbr.min_lat
-    else:
-        p_lat = (max(apt_mbr.min_lat, node_mbr.min_lat) +
-                 min(apt_mbr.max_lat, node_mbr.max_lat)) / 2.0
-
-    # Nearest lon in node_mbr to apt_mbr
-    if node_mbr.max_lon < apt_mbr.min_lon:
-        p_lon = node_mbr.max_lon
-    elif node_mbr.min_lon > apt_mbr.max_lon:
-        p_lon = node_mbr.min_lon
-    else:
-        p_lon = (max(apt_mbr.min_lon, node_mbr.min_lon) +
-                 min(apt_mbr.max_lon, node_mbr.max_lon)) / 2.0
-
-    return apt_mbr.mindist(p_lat, p_lon)
-
-
-def _min_dist_mbr_to_tree(apt_mbr, amenity_tree: RTreeNode) -> float:
-    """
-    Exact lower bound: min over all amenities a in amenity_tree of mindist(apt_mbr, a).
-
-    Traverses the amenity R-tree with branch-and-bound, pruning subtrees whose
-    MBR-to-MBR mindist already exceeds the current best.
-
-    This guarantees:
-        _min_dist_mbr_to_tree(apt_mbr, T) ≤ dist(p, nearest amenity)
-    for every apartment p inside apt_mbr.
-    """
-    best = float("inf")
-    tc = 0
-    heap: list = [(_mbr_to_mbr_mindist(apt_mbr, amenity_tree.mbr), tc, amenity_tree)]
-
-    while heap:
-        lb, _, node = heapq.heappop(heap)
-        if lb >= best:
-            break  # min-heap: nothing in queue can improve on best
-        if node.is_leaf:
-            for entry in node.entries:
-                d = apt_mbr.mindist(entry["latitude"], entry["longitude"])
-                if d < best:
-                    best = d
-        else:
-            for child in node.children:
-                child_lb = _mbr_to_mbr_mindist(apt_mbr, child.mbr)
-                if child_lb < best:
-                    tc += 1
-                    heapq.heappush(heap, (child_lb, tc, child))
-
-    return best
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 #  True MBM (Minimum Bounding Method) ANN search
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -228,8 +164,7 @@ def ann_search_mbm(
     type_trees: Dict[str, Optional[RTreeNode]],
     weights: Dict[str, float],
     top_k: int = 10,
-    debug: bool = False,
-):
+) -> List[dict]:
     """
     True MBM (Minimum Bounding Method) ANN search.
 
@@ -253,7 +188,7 @@ def ann_search_mbm(
     sorted by adist ascending.
     """
     if apt_tree is None:
-        return [] if not debug else {"results": [], "trace": None}
+        return []
 
     active_types = {
         tc: w for tc, w in weights.items()
@@ -261,70 +196,44 @@ def ann_search_mbm(
     }
 
     if not active_types:
-        return [] if not debug else {"results": [], "trace": None}
+        return []
 
-    # ── Debug: register every node in the apartment R-tree ───────────────────
-    if debug:
-        _node_id_map: Dict[int, int] = {}   # id(node) -> sequential int
-        _node_registry: List[dict] = []
-        _total_apts = 0
-
-        def _register(node: RTreeNode, level: int = 0) -> None:
-            nonlocal _total_apts
-            nid = len(_node_registry)
-            _node_id_map[id(node)] = nid
-            _node_registry.append({
-                "node_id": nid,
-                "mbr": {
-                    "min_lat": node.mbr.min_lat,
-                    "max_lat": node.mbr.max_lat,
-                    "min_lon": node.mbr.min_lon,
-                    "max_lon": node.mbr.max_lon,
-                },
-                "level": level,
-                "is_leaf": node.is_leaf,
-            })
-            if node.is_leaf:
-                _total_apts += len(node.entries)
-            else:
-                for child in node.children:
-                    _register(child, level + 1)
-
-        _register(apt_tree)
-        _steps: List[dict] = []
-        _stats: Dict[str, int] = {
-            "nodes_visited": 0,
-            "nodes_pruned": 0,
-            "apartments_checked": 0,
-            "total_apartments": _total_apts,
-        }
-
-    def _fmt(d: float) -> float:
-        """Serialise float("inf") as -1 for JSON."""
-        return -1.0 if d == float("inf") else round(d, 2)
-
-    # ── Shared search state ───────────────────────────────────────────────────
+    # Max-heap of size k to track best k results.
+    # Stored as (-adist, apt_dict) so heapq gives us the WORST of the best k.
     top_k_heap: list = []
-    heap_counter = 0
 
     def best_k_dist() -> float:
+        """Current worst adist among top-k. Returns inf if heap not full yet."""
         if len(top_k_heap) < top_k:
             return float("inf")
         return -top_k_heap[0][0]
 
     def compute_amindist(node: RTreeNode) -> float:
+        """
+        amindist(node, Q) = Σ w_i × mindist(node.mbr, nearest amenity of type i)
+
+        mindist(node.mbr, amenity_point) is the minimum possible distance from
+        any apartment inside node.mbr to that specific amenity — a valid lower
+        bound on the nearest-neighbour distance for any apartment in the node.
+        """
         total = 0.0
+        clat, clon = node.mbr.center()
         for type_code, weight in active_types.items():
-            d = _min_dist_mbr_to_tree(node.mbr, type_trees[type_code])
-            total += weight * d
+            tree = type_trees[type_code]
+            nearest = nearest_neighbor(tree, clat, clon)
+            if nearest is not None:
+                d = node.mbr.mindist(nearest["latitude"], nearest["longitude"])
+                total += weight * d
         return total
 
     def compute_adist(apt: dict) -> Tuple[float, dict]:
+        """Compute exact adist and nearest-amenity breakdown for one apartment."""
         lat, lon = apt["latitude"], apt["longitude"]
         adist = 0.0
         nearest_amenities: Dict[str, dict] = {}
         for type_code, weight in active_types.items():
-            nearest = nearest_neighbor(type_trees[type_code], lat, lon)
+            tree = type_trees[type_code]
+            nearest = nearest_neighbor(tree, lat, lon)
             if nearest is not None:
                 d = haversine(lat, lon, nearest["latitude"], nearest["longitude"])
                 adist += weight * d
@@ -334,80 +243,32 @@ def ann_search_mbm(
                 }
         return round(adist, 2), nearest_amenities
 
-    # ── MBM traversal ─────────────────────────────────────────────────────────
+    # Min-heap for MBM traversal: (amindist_lower_bound, tie_counter, node)
     counter = 0
     traversal_heap: list = [(0.0, counter, apt_tree)]
 
     while traversal_heap:
         lb, _, node = heapq.heappop(traversal_heap)
 
+        # Prune: lower bound already ≥ k-th best → this whole subtree can't improve
         if lb >= best_k_dist():
-            if debug:
-                nid = _node_id_map[id(node)]
-                _steps.append({"type": "prune", "node_id": nid,
-                                "amindist": _fmt(lb), "best_k_dist": _fmt(best_k_dist())})
-                _stats["nodes_pruned"] += 1
             continue
 
-        if debug:
-            nid = _node_id_map[id(node)]
-            _steps.append({"type": "visit", "node_id": nid,
-                            "amindist": _fmt(lb), "best_k_dist": _fmt(best_k_dist())})
-            _stats["nodes_visited"] += 1
-
         if node.is_leaf:
-            leaf_infos: List[dict] = []
-            topk_events: List[dict] = []
-
             for apt in node.entries:
-                if debug:
-                    _stats["apartments_checked"] += 1
-
                 adist, nearest_amenities = compute_adist(apt)
-
-                if debug:
-                    leaf_infos.append({"id": apt["id"], "adist": adist})
-
                 if adist < best_k_dist():
                     enriched = {**apt, "adist": adist, "nearest_amenities": nearest_amenities}
-                    heap_counter += 1
-                    heapq.heappush(top_k_heap, (-adist, heap_counter, enriched))
+                    heapq.heappush(top_k_heap, (-adist, enriched))
                     if len(top_k_heap) > top_k:
                         heapq.heappop(top_k_heap)
-                    if debug:
-                        topk_events.append({
-                            "type": "topk_update",
-                            "apt_id": apt["id"],
-                            "adist": adist,
-                        })
-
-            if debug:
-                nid = _node_id_map[id(node)]
-                _steps.append({"type": "leaf", "node_id": nid, "apartments": leaf_infos})
-                _steps.extend(topk_events)
-
         else:
             for child in node.children:
                 child_lb = compute_amindist(child)
                 if child_lb < best_k_dist():
                     counter += 1
                     heapq.heappush(traversal_heap, (child_lb, counter, child))
-                elif debug:
-                    child_nid = _node_id_map[id(child)]
-                    _steps.append({"type": "prune", "node_id": child_nid,
-                                   "amindist": _fmt(child_lb), "best_k_dist": _fmt(best_k_dist())})
-                    _stats["nodes_pruned"] += 1
 
-    results = [apt for (_, _, apt) in top_k_heap]
+    results = [apt for (_, apt) in top_k_heap]
     results.sort(key=lambda x: x["adist"])
-
-    if debug:
-        return {
-            "results": results,
-            "trace": {
-                "apt_tree_nodes": _node_registry,
-                "steps": _steps,
-                "stats": _stats,
-            },
-        }
     return results

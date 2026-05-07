@@ -6,8 +6,11 @@ Reference: Leutenegger, Lopez & Edgington (1997)
 
 The algorithm:
   1. Sort all n leaf entries by longitude (x).
-  2. Divide into P = ceil(sqrt(ceil(n/M))) vertical slices, each of
-     size P*M entries.  Sort each slice by latitude (y).
+  M: Max capacity of data samples in a node
+  n: The total number of data samples
+  L = number of leaf nodes L = ceil(n/M)
+  2. Divide into  P = ceil(sqrt(L))) vertical slices, each of
+     size P*M entries.Then Sort each slice by latitude (y).
   3. Pack consecutive groups of M entries into leaf nodes.
   4. Recursively apply the same tiling to internal nodes until a
      single root is produced.
