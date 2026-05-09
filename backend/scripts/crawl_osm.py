@@ -1,6 +1,6 @@
 """
 Crawl amenity data from OpenStreetMap Overpass API for the Thu Duc / District 9
-bounding box and insert into MySQL.
+bounding box and insert into SQLite.
 
 Run from the backend/ directory:
     python scripts/crawl_osm.py
@@ -11,16 +11,12 @@ Bounding box: (min_lat, min_lon, max_lat, max_lon) = (10.78, 106.70, 10.92, 106.
 import os
 import sys
 import time
+import sqlite3
 import urllib.request
 import urllib.parse
 import json
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import mysql.connector
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Config — add a new amenity type here and everything else is automatic
@@ -94,14 +90,9 @@ AMENITY_TYPES = [
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 DELAY_SECONDS = 1.5
 
-DB_CONFIG = {
-    "host":     os.getenv("DB_HOST", "localhost"),
-    "port":     int(os.getenv("DB_PORT", "3307")),
-    "database": os.getenv("DB_NAME", "ApartmentGPS"),
-    "user":     os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", ""),
-    "charset":  "utf8mb4",
-}
+DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "apartmentgps.db")
+
+_dict_factory = lambda cur, row: {col[0]: row[idx] for idx, col in enumerate(cur.description)}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -162,6 +153,33 @@ def extract_point(element: dict) -> tuple[float, float] | None:
 #  Database helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def init_schema(conn):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS apartments (
+            id          INTEGER PRIMARY KEY,
+            name        TEXT NOT NULL,
+            address     TEXT,
+            latitude    REAL NOT NULL,
+            longitude   REAL NOT NULL,
+            price_m2    REAL
+        );
+        CREATE TABLE IF NOT EXISTS amenity_types (
+            id              INTEGER PRIMARY KEY,
+            type_code       TEXT NOT NULL UNIQUE,
+            display_name    TEXT,
+            default_weight  REAL
+        );
+        CREATE TABLE IF NOT EXISTS amenities (
+            id          INTEGER PRIMARY KEY,
+            type_id     INTEGER NOT NULL,
+            name        TEXT,
+            latitude    REAL NOT NULL,
+            longitude   REAL NOT NULL,
+            FOREIGN KEY (type_id) REFERENCES amenity_types(id)
+        );
+    """)
+
+
 def sync_amenity_types(cur, conn) -> dict:
     """
     UPSERT amenity_types from AMENITY_TYPES list.
@@ -170,11 +188,8 @@ def sync_amenity_types(cur, conn) -> dict:
     for t in AMENITY_TYPES:
         cur.execute(
             """
-            INSERT INTO amenity_types (type_code, display_name, default_weight)
-            VALUES (%s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-                display_name   = VALUES(display_name),
-                default_weight = VALUES(default_weight)
+            INSERT OR REPLACE INTO amenity_types (type_code, display_name, default_weight)
+            VALUES (?, ?, ?)
             """,
             (t["type_code"], t["display_name"], t["default_weight"]),
         )
@@ -189,8 +204,10 @@ def sync_amenity_types(cur, conn) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def crawl():
-    conn = mysql.connector.connect(**DB_CONFIG)
-    cur = conn.cursor(dictionary=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = _dict_factory
+    init_schema(conn)
+    cur = conn.cursor()
 
     # 1. Sync amenity_types table
     print("Syncing amenity_types table…")
@@ -233,7 +250,7 @@ def crawl():
 
         if rows:
             cur.executemany(
-                "INSERT INTO amenities (type_id, name, latitude, longitude) VALUES (%s, %s, %s, %s)",
+                "INSERT INTO amenities (type_id, name, latitude, longitude) VALUES (?, ?, ?, ?)",
                 rows,
             )
             conn.commit()
@@ -248,8 +265,9 @@ def crawl():
     print(f"\nDone. Total amenities inserted: {total_inserted}")
 
     # 3. Print final counts per type
-    conn2 = mysql.connector.connect(**DB_CONFIG)
-    cur2 = conn2.cursor(dictionary=True)
+    conn2 = sqlite3.connect(DB_PATH)
+    conn2.row_factory = _dict_factory
+    cur2 = conn2.cursor()
     cur2.execute("""
         SELECT t.type_code, t.display_name, COUNT(a.id) AS count
         FROM amenity_types t

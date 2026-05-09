@@ -1,3 +1,6 @@
+# Database (generated locally — run scripts/crawl_osm.py to create)
+backend/apartmentgps.db
+
 # Logs
 logs
 *.log

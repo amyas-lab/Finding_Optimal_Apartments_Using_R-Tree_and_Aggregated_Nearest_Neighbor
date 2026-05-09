@@ -11,23 +11,12 @@ can run it multiple times safely.
 
 import sys
 import os
+import sqlite3
 
 # Make sure the backend package root is on the path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import mysql.connector
-from dotenv import load_dotenv
-
-load_dotenv()
-
-DB_CONFIG = {
-    "host":     os.getenv("DB_HOST", "localhost"),
-    "port":     int(os.getenv("DB_PORT", "3307")),
-    "database": os.getenv("DB_NAME", "ApartmentGPS"),
-    "user":     os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", ""),
-    "charset":  "utf8mb4",
-}
+DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "apartmentgps.db")
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  Sample data
@@ -91,7 +80,33 @@ AMENITIES = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 def seed():
-    conn = mysql.connector.connect(**DB_CONFIG)
+    conn = sqlite3.connect(DB_PATH)
+
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS apartments (
+            id          INTEGER PRIMARY KEY,
+            name        TEXT NOT NULL,
+            address     TEXT,
+            latitude    REAL NOT NULL,
+            longitude   REAL NOT NULL,
+            price_m2    REAL
+        );
+        CREATE TABLE IF NOT EXISTS amenity_types (
+            id              INTEGER PRIMARY KEY,
+            type_code       TEXT NOT NULL UNIQUE,
+            display_name    TEXT,
+            default_weight  REAL
+        );
+        CREATE TABLE IF NOT EXISTS amenities (
+            id          INTEGER PRIMARY KEY,
+            type_id     INTEGER NOT NULL,
+            name        TEXT,
+            latitude    REAL NOT NULL,
+            longitude   REAL NOT NULL,
+            FOREIGN KEY (type_id) REFERENCES amenity_types(id)
+        );
+    """)
+
     cur = conn.cursor()
 
     print("Clearing existing data…")
@@ -100,17 +115,12 @@ def seed():
     cur.execute("DELETE FROM apartments")
     conn.commit()
 
-    # Reset auto-increment so IDs stay predictable across runs
-    for table in ("amenities", "amenity_types", "apartments"):
-        cur.execute(f"ALTER TABLE {table} AUTO_INCREMENT = 1")
-    conn.commit()
-
     # amenity_types
     print("Inserting amenity types…")
     type_id_map = {}
     for type_code, display_name, default_weight in AMENITY_TYPES:
         cur.execute(
-            "INSERT INTO amenity_types (type_code, display_name, default_weight) VALUES (%s, %s, %s)",
+            "INSERT INTO amenity_types (type_code, display_name, default_weight) VALUES (?, ?, ?)",
             (type_code, display_name, default_weight),
         )
         type_id_map[type_code] = cur.lastrowid
@@ -120,7 +130,7 @@ def seed():
     # apartments
     print("Inserting apartments…")
     cur.executemany(
-        "INSERT INTO apartments (name, address, latitude, longitude, price_m2) VALUES (%s, %s, %s, %s, %s)",
+        "INSERT INTO apartments (name, address, latitude, longitude, price_m2) VALUES (?, ?, ?, ?, ?)",
         APARTMENTS,
     )
     conn.commit()
@@ -134,7 +144,7 @@ def seed():
         for name, lat, lon in places:
             rows.append((tid, name, lat, lon))
     cur.executemany(
-        "INSERT INTO amenities (type_id, name, latitude, longitude) VALUES (%s, %s, %s, %s)",
+        "INSERT INTO amenities (type_id, name, latitude, longitude) VALUES (?, ?, ?, ?)",
         rows,
     )
     conn.commit()

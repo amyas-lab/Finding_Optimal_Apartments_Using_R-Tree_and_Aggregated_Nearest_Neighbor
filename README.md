@@ -1,5 +1,23 @@
-# React + TypeScript + Vite
-- Open terminal: npm run dev
+---
+Instructions on how to deploy the project
+---
+# 1. Clone
+```
+git clone https://github.com/your/graph-query
+```
 
-# Backend server
--  
+# 2. Backend
+```
+cd backend
+pip install -r requirements.txt
+python scripts/crawl_osm.py    # fetches OSM data → creates apartmentgps.db automatically
+uvicorn main:app --reload --port 8000
+```
+
+No Docker, no MySQL, no .env needed — SQLite is built into Python.
+
+# 3. Frontend
+Open another terminal:
+```
+npm run dev
+```

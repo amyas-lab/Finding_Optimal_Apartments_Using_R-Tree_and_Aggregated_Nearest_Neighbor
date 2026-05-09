@@ -1,32 +1,49 @@
 """
-Database layer — MySQL connection and query helpers.
-
-Configuration is read from environment variables (see .env.example).
-Connection pooling is left to the caller; each function opens and closes
-its own connection so this module works correctly at startup and after a
-/reload call.
+Database layer — SQLite connection and query helpers.
+Database file: backend/apartmentgps.db (auto-created on first use).
 """
 
 import os
+import sqlite3
 from typing import Dict, List
 
-import mysql.connector
-from dotenv import load_dotenv
+_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "apartmentgps.db")
 
-load_dotenv()
-
-_DB_CONFIG: dict = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "port": int(os.getenv("DB_PORT", "3307")),
-    "database": os.getenv("DB_NAME", "ApartmentGPS"),
-    "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", "cps0107"),
-    "charset": "utf8mb4",
-}
+_dict_factory = lambda cur, row: {col[0]: row[idx] for idx, col in enumerate(cur.description)}
 
 
 def _connect():
-    return mysql.connector.connect(**_DB_CONFIG)
+    conn = sqlite3.connect(_DB_PATH)
+    conn.row_factory = _dict_factory
+    _init_schema(conn)
+    return conn
+
+
+def _init_schema(conn):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS apartments (
+            id          INTEGER PRIMARY KEY,
+            name        TEXT NOT NULL,
+            address     TEXT,
+            latitude    REAL NOT NULL,
+            longitude   REAL NOT NULL,
+            price_m2    REAL
+        );
+        CREATE TABLE IF NOT EXISTS amenity_types (
+            id              INTEGER PRIMARY KEY,
+            type_code       TEXT NOT NULL UNIQUE,
+            display_name    TEXT,
+            default_weight  REAL
+        );
+        CREATE TABLE IF NOT EXISTS amenities (
+            id          INTEGER PRIMARY KEY,
+            type_id     INTEGER NOT NULL,
+            name        TEXT,
+            latitude    REAL NOT NULL,
+            longitude   REAL NOT NULL,
+            FOREIGN KEY (type_id) REFERENCES amenity_types(id)
+        );
+    """)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -35,12 +52,11 @@ def load_apartments() -> List[dict]:
     """Return all rows from the `apartments` table as plain dicts."""
     conn = _connect()
     try:
-        cur = conn.cursor(dictionary=True)
+        cur = conn.cursor()
         cur.execute(
             "SELECT id, name, address, latitude, longitude, price_m2 FROM apartments"
         )
         rows = cur.fetchall()
-        # mysql-connector may return Decimal — cast to float for JSON serialisation
         for row in rows:
             row["latitude"] = float(row["latitude"])
             row["longitude"] = float(row["longitude"])
@@ -59,7 +75,7 @@ def load_amenities_by_type() -> Dict[str, List[dict]]:
     """
     conn = _connect()
     try:
-        cur = conn.cursor(dictionary=True)
+        cur = conn.cursor()
         cur.execute(
             """
             SELECT
@@ -88,7 +104,7 @@ def load_amenity_types() -> List[dict]:
     """Return all rows from `amenity_types`."""
     conn = _connect()
     try:
-        cur = conn.cursor(dictionary=True)
+        cur = conn.cursor()
         cur.execute(
             "SELECT id, type_code, display_name, default_weight FROM amenity_types"
         )
